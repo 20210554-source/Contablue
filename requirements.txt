@@ -1,4 +1,7 @@
-streamlit>=1.36
+streamlit>=1.52
 Pillow
 pandas
+requests
+openpyxl
 inference-sdk
+pillow-heif

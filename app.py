@@ -776,16 +776,7 @@ with tab_guia:
         st.markdown("✅ **Misma distancia y mismo ángulo** en todas las fotos  \n"
                     "✅ **Luz pareja**, sin contraluz  \n"
                     "✅ **Una foto = una planta** (o 1 m de hilera)")
-        if imagenes_guia is not None:
-            f1, f2, f3 = st.columns(3)
-            for col, nom, pie in ((f1, "campo_pie", "De pie, hacia abajo"),
-                                  (f2, "campo_agachado", "Agachado, de frente"),
-                                  (f3, "campo_hilera", "Una planta de la hilera")):
-                with col:
-                    st.image(imagenes_guia.imagen_guia(nom)[0], width="stretch")
-                    st.caption(pie)
         mostrar_guia("angulos", "Picado, frontal y cenital. Elige uno y úsalo siempre.", foto_real=True)
-        mostrar_guia("encuadre", "La rama debe llenar la pantalla. Evita fotos lejanas, movidas o a contraluz.")
     with st.expander("🟢🫐 Verde o madura"):
         mostrar_guia("madurez", "Verde, pintona y madura: así se cuenta cada una.")
         st.markdown("🟢 **Verde** = aún no está lista  \n"

@@ -28,16 +28,26 @@ def preparar_imagen(archivo, max_lado=1280):
 
 
 def detectar(img, api_key, model_id, confianza=0.4, solape=0.5, api_url="https://serverless.roboflow.com"):
-    """Envía la imagen a la API en la nube de Roboflow y devuelve la lista de predicciones."""
-    from inference_sdk import InferenceConfiguration, InferenceHTTPClient
+    """Envía la imagen a la API web de Roboflow y devuelve la lista de predicciones.
 
-    try:
-        cfg = InferenceConfiguration(confidence_threshold=confianza, iou_threshold=solape,
-                                     api_key_transport="header")
-    except TypeError:  # versiones antiguas del SDK
-        cfg = InferenceConfiguration(confidence_threshold=confianza, iou_threshold=solape)
-    cliente = InferenceHTTPClient(api_url=api_url, api_key=api_key).configure(cfg)
-    res = cliente.infer(img, model_id=model_id.strip())
+    Llama directo a la API (sin librerías pesadas), así funciona en cualquier servidor."""
+    import base64
+    import io
+
+    import requests
+
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    r = requests.post(
+        f"{api_url}/{model_id.strip().strip('/')}",
+        params={"api_key": api_key, "confidence": int(confianza * 100), "overlap": int(solape * 100)},
+        data=base64.b64encode(buf.getvalue()),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"{r.status_code} {r.text[:150]}")
+    res = r.json()
     if isinstance(res, list):
         res = res[0] if res else {}
     preds = res.get("predictions", [])

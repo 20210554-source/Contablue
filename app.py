@@ -142,6 +142,8 @@ DEFECTOS = {
     "hoja_token": secreto("SHEETS_TOKEN"),
     "hoja_enlace": secreto("SHEETS_LINK"),
     "hoja_auto": True,
+    "avanzado": False,
+    "consultas": 0,
 }
 # Ajustes que se guardan en el enlace (nunca la API key)
 PERSISTENTES = ["confianza", "solape", "clases_flor", "clases_verde", "clases_madura",
@@ -149,8 +151,11 @@ PERSISTENTES = ["confianza", "solape", "clases_flor", "clases_verde", "clases_ma
 
 for k, v in DEFECTOS.items():
     st.session_state.setdefault(k, v)
-for k, v in {"muestras": [], "calib": [], "ver": 0, "ed_ver": 0, "mosaicos": False}.items():
+for k, v in {"muestras": [], "calib": [], "ver": 0, "ed_ver": 0, "mosaicos": False, "lote_txt": "Lote 1"}.items():
     st.session_state.setdefault(k, v)
+# Conserva los valores aunque su cuadro no se muestre (por ejemplo, en el modo simple)
+for k in list(DEFECTOS) + ["mosaicos", "lote_txt"]:
+    st.session_state[k] = st.session_state[k]
 
 if "restaurado" not in st.session_state:
     st.session_state.restaurado = True
@@ -186,9 +191,11 @@ def mensaje_error(e):
     t = str(e)
     tl = t.lower()
     if any(s in tl for s in ("401", "403", "unauthorized", "forbidden", "invalid api key")):
-        return "La **API key** no es válida o no tiene permiso. Revísala en ⚙️ Ajustes → Conexión."
+        return ("La **API key** no es válida o no tiene permiso (o no hay créditos). Quien administra la app debe "
+                f"revisarla en Streamlit → Secrets.\n\nDetalle técnico: `{t[:200]}`")
     if "404" in tl or "not found" in tl or "no such model" in tl:
-        return "No se encontró el modelo. Revisa que el **Model ID** esté bien copiado y que el modelo esté entrenado."
+        return ("No se encontró el modelo. Revisa que el **Model ID** esté bien copiado y que el modelo esté entrenado."
+                f"\n\nDetalle técnico: `{t[:200]}`")
     if any(s in tl for s in ("timeout", "timed out", "connection", "resolve", "unreachable")):
         return "No hay conexión con Roboflow. Revisa tu internet e inténtalo de nuevo."
     if "429" in tl or "rate" in tl or "quota" in tl or "limit" in tl:
@@ -270,7 +277,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_cap, tab_res, tab_aj, tab_guia = st.tabs(["📷 Capturar", "📊 Resumen", "⚙️ Ajustes", "📖 Guía"])
+avanzado = st.toggle("⚙️ Modo avanzado", key="avanzado",
+                     help="Apagado: solo lo básico (lote, foto, guardar). Encendido: ajustes, calibración, "
+                          "mosaicos, tabla editable y más.")
+if avanzado:
+    tab_cap, tab_res, tab_aj, tab_guia = st.tabs(["📷 Capturar", "📊 Resumen", "⚙️ Ajustes", "📖 Guía"])
+else:
+    tab_cap, tab_res, tab_guia = st.tabs(["📷 Capturar", "📊 Resumen", "📖 Guía"])
+    tab_aj = None
 
 # =====================================================================
 # AJUSTES (se define primero: Capturar y Resumen leen estos valores)
@@ -278,21 +292,21 @@ tab_cap, tab_res, tab_aj, tab_guia = st.tabs(["📷 Capturar", "📊 Resumen", "
 BLOQ_RF = bool(secreto("ROBOFLOW_API_KEY") and secreto("ROBOFLOW_MODEL_ID"))
 BLOQ_HOJA = bool(secreto("SHEETS_URL") and secreto("SHEETS_TOKEN"))
 
-with tab_aj:
+def ajustes():
     with st.expander("🔌 Conexión con Roboflow", expanded=not st.session_state.api_key):
         if BLOQ_RF:
             st.success("🔒 Conexión configurada de forma segura en el servidor. "
                        "La API key y el Model ID no se muestran aquí.")
         else:
-            st.text_input("API key", type="password", key="api_key")
-            st.text_input("Model ID (proyecto/versión)", placeholder="mi-proyecto/1", key="model_id")
+            st.warning("Falta conectar Roboflow. Quien administra la app debe guardar ROBOFLOW_API_KEY y "
+                       "ROBOFLOW_MODEL_ID en Streamlit → Settings → Secrets.")
         st.slider("Confianza mínima", 0.05, 0.95, step=0.05, key="confianza",
                   help="Súbela si detecta cosas que no son frutos; bájala si se le pasan frutos.")
         st.slider("Solape máximo (NMS)", 0.1, 0.9, step=0.05, key="solape",
                   help="Evita contar dos veces el mismo fruto.")
         if st.button("🔎 Probar conexión con Roboflow", width="stretch"):
             if not (st.session_state.api_key and st.session_state.model_id):
-                st.warning("Escribe primero la API key y el Model ID.")
+                st.warning("Roboflow aún no está conectado (faltan los Secrets).")
             else:
                 try:
                     with st.spinner("Probando…"):
@@ -302,27 +316,17 @@ with tab_aj:
                 except Exception as e:
                     st.error(mensaje_error(e))
 
-    with st.expander("☁️ Hoja de cálculo (Google Sheets)", expanded=not hoja_configurada()):
-        st.caption("Guarda cada muestra en tu hoja de Google. Los pasos para conectarla están en la pestaña 📖 Guía.")
-        if BLOQ_HOJA:
-            st.success("🔒 Hoja conectada de forma segura en el servidor. La dirección y la clave no se muestran.")
-        else:
-            st.text_input("Dirección del script (termina en /exec)", key="hoja_url")
-            st.text_input("Clave secreta", type="password", key="hoja_token")
-        st.text_input("Enlace de tu hoja (opcional, para abrirla desde la app)", key="hoja_enlace")
-        st.toggle("Enviar automáticamente al guardar cada muestra", key="hoja_auto")
-        if st.button("🔎 Probar conexión con la hoja", width="stretch"):
-            if not hoja_configurada():
-                st.warning("Escribe primero la dirección del script y la clave secreta.")
-            else:
+    if BLOQ_HOJA:
+        with st.expander("☁️ Google Sheets"):
+            st.success("🔒 Hoja conectada de forma segura. Los datos de conexión no se muestran aquí.")
+            st.toggle("Enviar automáticamente al guardar cada muestra", key="hoja_auto")
+            if st.button("🔎 Probar conexión con la hoja", width="stretch"):
                 try:
                     with st.spinner("Probando…"):
                         nucleo.enviar_a_hoja(st.session_state.hoja_url, st.session_state.hoja_token, [], accion="probar")
                     st.success("✅ Conexión correcta: la app puede escribir en tu hoja.")
                 except Exception as e:
                     st.error(mensaje_hoja_error(e))
-        st.caption("Para no escribir estos datos cada vez, guárdalos en los *Secrets* de Streamlit "
-                   "(SHEETS_URL, SHEETS_TOKEN y SHEETS_LINK).")
 
     with st.expander("🏷️ Clases del modelo"):
         st.caption("Escribe los nombres tal como están en tu proyecto de Roboflow, separados por coma.")
@@ -384,6 +388,10 @@ with tab_aj:
                 b1.button("✅ Usar este factor", on_click=aplicar_factor, width="stretch")
                 b2.button("🗑️ Borrar pares", on_click=limpiar_calibracion, width="stretch")
 
+if avanzado:
+    with tab_aj:
+        ajustes()
+
 # Lectura de ajustes
 api_key = st.session_state.api_key
 model_id = st.session_state.model_id
@@ -403,6 +411,7 @@ params = (st.session_state.unidades_ha, st.session_state.factor_oclusion,
 
 def analizar(img, usar_mosaicos):
     def una(tile):
+        st.session_state.consultas += 1
         return nucleo.detectar(tile, api_key, model_id, st.session_state.confianza, st.session_state.solape)
     return nucleo.detectar_mosaicos(img, una) if usar_mosaicos else una(img)
 
@@ -418,7 +427,7 @@ with tab_cap:
     if not st.session_state.muestras:
         st.markdown(
             '<div class="inicio"><b>Cómo empezar</b><br>'
-            '1️⃣ Elige el lote y la variedad.<br>2️⃣ Toma una foto de la planta o del tramo.<br>'
+            '1️⃣ Escribe el nombre del lote y elige la variedad.<br>2️⃣ Toma una foto de la planta o del tramo.<br>'
             '3️⃣ Revisa el conteo y pulsa <b>Guardar muestra</b>.<br>'
             '4️⃣ Repite en 20 puntos del lote y mira el resultado en <b>📊 Resumen</b>.</div>',
             unsafe_allow_html=True,
@@ -428,38 +437,49 @@ with tab_cap:
     with st.container(border=True):
         st.markdown("**📍 Datos de la muestra**")
         c1, c2 = st.columns(2)
-        opciones = lotes_exist + [NUEVO_LOTE]
-        ultimo = st.session_state.get("ultimo_lote")
-        idx = opciones.index(ultimo) if ultimo in opciones else 0
-        sel_lote = c1.selectbox("Lote / parcela", opciones, index=idx)
+        c1.text_input("Nombre del lote", key="lote_txt", help="Escribe el nombre de la zona del campo. "
+                      "Se recuerda para las siguientes fotos.")
         variedad = c2.selectbox("Variedad", VARIEDADES)
-        if sel_lote == NUEVO_LOTE:
-            lote = st.text_input("Nombre del lote nuevo", value=f"Lote {len(lotes_exist) + 1}")
+        lote = st.session_state.lote_txt
+        if lotes_exist:
+            st.caption("Lotes ya usados: " + ", ".join(lotes_exist))
+        n_lote = sum(1 for m in st.session_state.muestras if m["lote"] == (lote or "").strip())
+        st.progress(min(n_lote / MUESTRAS_META, 1.0), text=f"{n_lote} de {MUESTRAS_META} fotos en este lote")
+        if avanzado:
+            with st.expander("Más datos (opcional)"):
+                c3, c4 = st.columns(2)
+                etapa = c3.selectbox("Etapa del cultivo", ETAPAS)
+                unidad = c4.selectbox("Unidad de muestreo", UNIDADES)
+                st.text_input("Tu nombre (responsable)", key="responsable", placeholder="Ana Pérez")
+                etiqueta = st.text_input("Etiqueta", placeholder="Hilera 4 - planta 12")
+                nota = st.text_input("Nota", placeholder="Sombra, poda reciente…")
         else:
-            lote = sel_lote
-        with st.expander("Más datos (opcional)"):
-            c3, c4 = st.columns(2)
-            etapa = c3.selectbox("Etapa del cultivo", ETAPAS)
-            unidad = c4.selectbox("Unidad de muestreo", UNIDADES)
-            st.text_input("Tu nombre (responsable)", key="responsable", placeholder="Ana Pérez")
-            etiqueta = st.text_input("Etiqueta", placeholder="Hilera 4 - planta 12")
-            nota = st.text_input("Nota", placeholder="Sombra, poda reciente…")
+            etapa, unidad, etiqueta, nota = ETAPAS[2], UNIDADES[0], "", ""
+            st.text_input("Tu nombre (opcional)", key="responsable", placeholder="Ana Pérez")
 
-    modo = st.radio("Modo de conteo", ["🤖 Automático (Roboflow)", "✍️ Manual (sin modelo)"], horizontal=True)
-    automatico = modo.startswith("🤖")
-    if automatico:
-        st.toggle("🔬 Alta precisión (mosaicos)", key="mosaicos",
-                  help="Analiza la foto en 4 partes. Detecta mejor las bayas muy pequeñas o lejanas, "
-                       "pero tarda más y usa 4 consultas por foto.")
-        if not (api_key and model_id):
-            st.info("Para el modo automático completa la **API key** y el **Model ID** en la pestaña "
-                    "**⚙️ Ajustes**. Mientras tanto puedes usar el modo manual.")
+    if avanzado:
+        modo = st.radio("Modo de conteo", ["🤖 Automático (Roboflow)", "✍️ Manual (sin modelo)"], horizontal=True)
+        automatico = modo.startswith("🤖")
+        if automatico:
+            st.toggle("🔬 Alta precisión (mosaicos)", key="mosaicos",
+                      help="Analiza la foto en 4 partes. Detecta mejor las bayas muy pequeñas o lejanas, "
+                           "pero tarda más y usa 4 consultas por foto.")
+            if not (api_key and model_id):
+                st.info("El modo automático aún no está conectado a Roboflow. Mientras tanto puedes usar el modo manual.")
+    else:
+        automatico = bool(api_key and model_id)
+        modo = "🤖 Automático" if automatico else "✍️ Manual"
+        if not automatico:
+            st.info("Roboflow aún no está conectado: cuenta la foto a ojo y escribe los números.")
 
     paso(1, "Toma la foto")
     st.markdown(f'<div class="subt">Misma distancia y encuadre en todas las fotos: cada foto es una '
                 f'unidad de muestreo ({unidad.lower()}).</div>', unsafe_allow_html=True)
-    origen = st.radio("Origen de la foto", ["📱 Tomar o subir foto", "📸 Cámara en vivo"], horizontal=True,
-                      label_visibility="collapsed")
+    if avanzado:
+        origen = st.radio("Origen de la foto", ["📱 Tomar o subir foto", "📸 Cámara en vivo"], horizontal=True,
+                          label_visibility="collapsed")
+    else:
+        origen = "📱 Tomar o subir foto"
     if origen.startswith("📱"):
         archivo = st.file_uploader("Toca aquí y elige: cámara o galería", key=f"up_{st.session_state.ver}",
                                    help="Acepta fotos de la galería en cualquier formato (JPG, PNG, HEIC, etc.).")
@@ -475,20 +495,26 @@ with tab_cap:
     if hay_foto:
         datos = archivo.getvalue()
         huella = hashlib.md5(datos).hexdigest()
-        usar_mos = bool(st.session_state.mosaicos and automatico)
+        usar_mos = bool(st.session_state.mosaicos and automatico and avanzado)
 
         if st.session_state.get("firma_img") != (huella, usar_mos):
             st.session_state.firma_img = (huella, usar_mos)
             st.session_state.pred = None
             st.session_state.error = None
+            st.session_state.forzar = False
+            st.session_state.gps = nucleo.gps_exif(datos)
             try:
                 st.session_state.img = nucleo.preparar_imagen(io.BytesIO(datos), 1600 if usar_mos else 1280)
+                st.session_state.problemas_foto = nucleo.calidad_foto(st.session_state.img)
             except Exception as e:
+                st.session_state.problemas_foto = []
                 st.session_state.img = None
                 st.session_state.error = ("Ese archivo no parece una foto que pueda leer. Prueba con otra foto de la galería "
                                           "o toma una nueva con la cámara.")
 
-        if (automatico and api_key and model_id and st.session_state.get("pred") is None
+        problemas = st.session_state.get("problemas_foto") or []
+        bloquea = bool(problemas) and not st.session_state.get("forzar")
+        if (automatico and api_key and model_id and st.session_state.get("pred") is None and not bloquea
                 and st.session_state.get("img") is not None and not st.session_state.get("error")):
             with st.spinner("Detectando flores y bayas…" + (" (mosaicos)" if usar_mos else "")):
                 try:
@@ -497,6 +523,13 @@ with tab_cap:
                     st.session_state.error = mensaje_error(e)
 
         paso(2, "Resultado")
+        if problemas:
+            st.warning("📷 La foto " + " y ".join(problemas) + ". Con una foto así el conteo sale mal. "
+                       "Conviene repetirla (cada análisis usa una consulta de tu cuenta de Roboflow).")
+            if bloquea and automatico and api_key and model_id:
+                if st.button("Analizar de todos modos", width="stretch"):
+                    st.session_state.forzar = True
+                    st.rerun()
         if st.session_state.get("error"):
             st.error(st.session_state.error)
         pred = st.session_state.get("pred")
@@ -510,9 +543,12 @@ with tab_cap:
 
         if img is not None:
             if automatico and pred is not None:
-                t1, t2 = st.columns(2)
-                mostrar_cajas = t1.toggle("Mostrar cajas", value=True)
-                mostrar_nombres = t2.toggle("Verde o madura", value=True)
+                if avanzado:
+                    t1, t2 = st.columns(2)
+                    mostrar_cajas = t1.toggle("Mostrar cajas", value=True)
+                    mostrar_nombres = t2.toggle("Verde o madura", value=True)
+                else:
+                    mostrar_cajas = mostrar_nombres = True
                 if mostrar_cajas:
                     dibujo, color = nucleo.dibujar(img, pred, COLORES_CLASE, NOMBRES, mostrar_nombres)
                 else:
@@ -550,6 +586,8 @@ with tab_cap:
 
         st.caption("Revisa los valores y corrígelos si hace falta antes de guardar:" if automatico
                    else "Cuenta la foto a ojo y escribe los valores:")
+        if st.session_state.get("gps"):
+            st.caption("📍 Esta foto trae su ubicación y se guardará con la muestra.")
         e1, e2, e3 = st.columns(3)
         flores_f = e1.number_input("🌸 Flores", min_value=0, value=int(flores), step=1, key=f"f_{huella}_{modo}")
         verdes_f = e2.number_input("🟢 Verdes", min_value=0, value=int(verdes), step=1, key=f"v_{huella}_{modo}")
@@ -570,6 +608,8 @@ with tab_cap:
                 "maduras": maduras_f,
                 "modo": "auto" if automatico else "manual",
                 "nota": nota,
+                "lat": (st.session_state.get("gps") or (None, None))[0],
+                "lon": (st.session_state.get("gps") or (None, None))[1],
             })
             st.session_state.muestras.append(nueva)
             st.session_state.ultimo_lote = nueva["lote"]
@@ -584,6 +624,8 @@ with tab_cap:
     else:
         st.markdown('<div class="vacio"><div class="ico">📷</div>Toma o elige una foto para empezar.</div>',
                     unsafe_allow_html=True)
+    if st.session_state.consultas:
+        st.caption(f"🧾 Consultas a Roboflow en esta sesión: {st.session_state.consultas}")
 
 # =====================================================================
 # RESUMEN
@@ -593,6 +635,35 @@ with tab_res:
         _f = st.session_state.pop("flash_res")
         (st.warning if "⚠️" in _f else st.success)(_f)
     todas = st.session_state.muestras
+    st.markdown("**💾 Guardar tus datos**")
+    cx, ch = st.columns(2)
+    with cx:
+        if todas:
+            st.download_button(
+                "📊 Descargar Excel", nucleo.generar_excel(todas, params, st.session_state.area_ha),
+                "contablue.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch")
+        else:
+            st.button("📊 Descargar Excel", disabled=True, width="stretch", key="xl_off")
+    with ch:
+        if hoja_configurada() and todas:
+            pend = [m for m in todas if m.get("sync") != "ok"]
+            if st.button(f"☁️ Enviar a Google Sheets ({len(pend)})", disabled=not pend, width="stretch"):
+                with st.spinner("Enviando…"):
+                    st.session_state.flash_res, _ok = enviar_pendientes()
+                st.rerun()
+        else:
+            st.button("☁️ Enviar a Google Sheets", disabled=True, width="stretch", key="gs_off")
+    if not todas:
+        st.caption("Se activan cuando guardes tu primera muestra.")
+    elif not hoja_configurada():
+        st.caption("Google Sheets no está conectado (opcional).")
+    else:
+        st.caption(f"{len(todas) - len([m for m in todas if m.get('sync') != 'ok'])} muestras ya están en tu hoja.")
+        if st.session_state.hoja_enlace:
+            st.link_button("📄 Abrir mi hoja de Google", st.session_state.hoja_enlace, width="stretch")
+    st.divider()
+
     if not todas:
         st.markdown('<div class="vacio"><div class="ico">🫐</div>Aún no hay muestras guardadas.<br>'
                     'Ve a <b>📷 Capturar</b>, toma una foto y pulsa <b>Guardar muestra</b>.</div>',
@@ -660,7 +731,30 @@ with tab_res:
                               "kg/ha": round(rr["kg_ha_total"]), "Confianza": rr["calidad"]})
             st.dataframe(pd.DataFrame(filas), hide_index=True)
 
-        st.markdown("**📤 Resumen para compartir**")
+        st.markdown("**📈 ¿Cómo avanza la madurez?**")
+        ev = nucleo.evolucion_madurez(muestras)
+        fechas = sorted({e["fecha"] for e in ev})
+        if len(fechas) >= 2:
+            tabla_ev = pd.DataFrame(ev).pivot_table(index="fecha", columns="lote", values="madurez") * 100
+            st.line_chart(tabla_ev)
+            st.caption("% de bayas maduras por día. Cuando la línea sube, la cosecha se acerca.")
+        else:
+            st.caption("Cuando tengas muestras de **dos o más días** verás aquí cómo avanza la madurez de cada lote.")
+
+        con_gps = [m for m in muestras if m.get("lat") is not None and m.get("lon") is not None]
+        if con_gps:
+            st.markdown("**📍 Dónde se tomaron las fotos**")
+            st.map(pd.DataFrame([{"lat": m["lat"], "lon": m["lon"]} for m in con_gps]))
+            st.caption(f"{len(con_gps)} de {len(muestras)} muestras tienen ubicación. "
+                       "Las fotos de la galería la traen si la cámara tenía el GPS activado.")
+
+        st.markdown("**📤 Compartir**")
+        try:
+            st.download_button("📄 Descargar informe PDF",
+                               nucleo.informe_pdf(muestras, params, area, "Todos los lotes" if sel.startswith("Todos") else sel),
+                               "informe_contablue.pdf", "application/pdf", width="stretch")
+        except Exception:
+            st.caption("No se pudo preparar el informe PDF en este momento.")
         texto = (
             f"ContaBlue · {sel} · {datetime.now():%d/%m/%Y}\n"
             f"Muestras: {n}\n"
@@ -674,6 +768,13 @@ with tab_res:
         st.code(texto, language=None)
         st.caption("Toca el icono de copiar y pégalo en WhatsApp o correo.")
 
+        if st.button("↩️ Borrar la última muestra guardada", width="stretch"):
+            st.session_state.muestras = st.session_state.muestras[:-1]
+            st.session_state.ed_ver += 1
+            st.session_state.flash_res = "↩️ Se borró la última muestra (si ya estaba en tu hoja de Google, sigue allí)."
+            st.rerun()
+
+    if avanzado and todas:
         with st.expander("📋 Ver y editar todas las muestras"):
             columnas = ["etiqueta", "lote", "variedad", "etapa", "flores", "verdes", "maduras", "responsable",
                         "nota", "hora", "modo", "unidad", "sync", "id", "bayas"]
@@ -700,6 +801,8 @@ with tab_res:
                     if vacia:
                         continue
                     o = originales.get(m["id"])
+                    if o is not None:
+                        m["lat"], m["lon"] = o.get("lat"), o.get("lon")
                     campos = ("lote", "variedad", "etapa", "etiqueta", "flores", "verdes", "maduras", "responsable", "nota")
                     if o is None or any(o.get(c) != m.get(c) for c in campos):
                         m["sync"] = ""        # cambió: hay que volver a enviarla
@@ -708,22 +811,6 @@ with tab_res:
                 st.session_state.ed_ver += 1
                 st.session_state.flash_res = "💾 Cambios guardados."
                 st.rerun()
-
-        st.markdown("**☁️ Hoja de cálculo y Excel**")
-        if hoja_configurada():
-            pend = [m for m in todas if m.get("sync") != "ok"]
-            st.caption(f"{len(todas) - len(pend)} muestras enviadas a tu hoja · {len(pend)} pendientes")
-            if st.button(f"☁️ Enviar {len(pend)} pendientes a la hoja", disabled=not pend, width="stretch"):
-                with st.spinner("Enviando…"):
-                    st.session_state.flash_res, _ok = enviar_pendientes()
-                st.rerun()
-            if st.session_state.hoja_enlace:
-                st.link_button("📄 Abrir mi hoja de Google", st.session_state.hoja_enlace, width="stretch")
-        else:
-            st.caption("Conecta tu hoja de Google en ⚙️ Ajustes → Hoja de cálculo para guardar todo en la nube.")
-        st.download_button(
-            "📥 Descargar Excel (.xlsx)", nucleo.generar_excel(todas, params, st.session_state.area_ha),
-            "contablue.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 
         st.markdown("**Guardar o restaurar tus datos**")
         guardado_ok = nucleo.codificar_estado({"m": todas, "a": {k: st.session_state[k] for k in PERSISTENTES}}) is not None
@@ -741,21 +828,22 @@ with tab_res:
             st.session_state.ed_ver += 1
             st.rerun()
 
-    with st.expander("⬆️ Cargar muestras guardadas (CSV)"):
-        st.caption("Carga un CSV descargado antes de ContaBlue para continuar donde lo dejaste.")
-        sub = st.file_uploader("Archivo CSV de ContaBlue", type=["csv"], key="csv_in")
-        if sub is not None and st.button("Cargar muestras", width="stretch"):
-            try:
-                dfi = pd.read_csv(sub)
-                if not {"lote", "flores"}.issubset(dfi.columns):
-                    st.error("El archivo no tiene las columnas necesarias (lote, flores).")
-                else:
-                    nuevas = [nucleo.sanear_muestra(f) for f in dfi.to_dict("records")]
-                    st.session_state.muestras.extend(nuevas)
-                    st.session_state.flash_res = f"⬆️ Se cargaron {len(nuevas)} muestras."
-                    st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo leer el archivo: {e}")
+    if avanzado:
+        with st.expander("⬆️ Cargar muestras guardadas (CSV)"):
+            st.caption("Carga un CSV descargado antes de ContaBlue para continuar donde lo dejaste.")
+            sub = st.file_uploader("Archivo CSV de ContaBlue", type=["csv"], key="csv_in")
+            if sub is not None and st.button("Cargar muestras", width="stretch"):
+                try:
+                    dfi = pd.read_csv(sub)
+                    if not {"lote", "flores"}.issubset(dfi.columns):
+                        st.error("El archivo no tiene las columnas necesarias (lote, flores).")
+                    else:
+                        nuevas = [nucleo.sanear_muestra(f) for f in dfi.to_dict("records")]
+                        st.session_state.muestras.extend(nuevas)
+                        st.session_state.flash_res = f"⬆️ Se cargaron {len(nuevas)} muestras."
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo leer el archivo: {e}")
 
 # =====================================================================
 # GUÍA
@@ -791,7 +879,7 @@ with tab_guia:
                     "repartidas por todo el lote: bordes, centro, zonas altas y bajas.")
     with st.expander("💾 Guardar en Excel o Google Sheets"):
         st.markdown("📊 **Excel:** en **Resumen** pulsa **Descargar Excel**.  \n"
-                    "☁️ **Google Sheets:** conéctalo en **Ajustes → Hoja de cálculo**; cada muestra se envía sola.")
+                    "☁️ **Google Sheets:** si está conectado, cada muestra se envía sola.")
         st.caption("Sin internet, la muestra queda pendiente y la envías después desde Resumen.")
     with st.expander("🎯 Calibrar y cómo se calcula (avanzado)"):
         st.markdown(
@@ -800,6 +888,10 @@ with tab_guia:
             "**Fórmula:** `kg/ha = (bayas + flores × cuajado) × oclusión × unidades por ha × peso por baya`. "
             "Se promedian las muestras y se da un margen de error del 95 %."
         )
+    with st.expander("⚙️ Modo simple y modo avanzado"):
+        st.markdown("**Simple** (por defecto): lote, foto y guardar. Nada más.  \n"
+                    "**Avanzado:** ajustes del modelo, calibración, mosaicos, tabla editable y copia en CSV.")
+        st.caption("Si la foto sale movida, oscura o muy clara, la app te avisa antes de gastar una consulta.")
     with st.expander("🔒 Privacidad"):
         st.markdown("Las **fotos no se guardan**. Tus conteos quedan en el enlace de la página y en tu CSV, Excel "
                     "u hoja. La API key va solo en los *Secrets* de Streamlit.")

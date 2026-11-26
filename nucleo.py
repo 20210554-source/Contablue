@@ -227,6 +227,16 @@ def _txt(x):
     return str(x)
 
 
+def _coord(x, limite):
+    try:
+        v = float(x)
+        if math.isnan(v) or abs(v) > limite:
+            return None
+        return round(v, 5)
+    except (TypeError, ValueError):
+        return None
+
+
 def sanear_muestra(d):
     """Devuelve una muestra limpia y con todos los campos, venga de donde venga."""
     m = {k: _txt(d.get(k)) for k in CAMPOS_TEXTO}
@@ -237,6 +247,10 @@ def sanear_muestra(d):
     m["verdes"] = _int(d.get("verdes"))
     m["maduras"] = _int(d.get("maduras"))
     m["bayas"] = m["verdes"] + m["maduras"] if (m["verdes"] + m["maduras"]) > 0 else _int(d.get("bayas"))
+    m["lat"] = _coord(d.get("lat"), 90)
+    m["lon"] = _coord(d.get("lon"), 180)
+    if m["lat"] is None or m["lon"] is None:
+        m["lat"] = m["lon"] = None
     return m
 
 
@@ -262,7 +276,7 @@ def decodificar_estado(txt):
 # Google Sheets (mediante un script de Apps Script del propio usuario)
 # =====================================================================
 COLUMNAS_HOJA = ["id", "hora", "responsable", "lote", "variedad", "etapa", "unidad", "etiqueta",
-                 "flores", "verdes", "maduras", "bayas", "modo", "nota"]
+                 "flores", "verdes", "maduras", "bayas", "modo", "nota", "lat", "lon"]
 
 
 def _seguro(v):
@@ -273,7 +287,7 @@ def _seguro(v):
 
 
 def _para_hoja(m):
-    return {c: _seguro(m.get(c, "")) for c in COLUMNAS_HOJA}
+    return {c: _seguro("" if m.get(c) is None else m.get(c, "")) for c in COLUMNAS_HOJA}
 
 
 def url_hoja_valida(url):
@@ -384,16 +398,16 @@ def generar_excel(muestras, params, area_ha=1.0):
     cols = [("hora", "Fecha y hora"), ("responsable", "Responsable"), ("lote", "Lote"), ("variedad", "Variedad"),
             ("etapa", "Etapa"), ("unidad", "Unidad"), ("etiqueta", "Etiqueta"), ("flores", "Flores"),
             ("verdes", "Verdes"), ("maduras", "Maduras"), ("bayas", "Bayas (total)"), ("modo", "Modo"),
-            ("nota", "Nota")]
+            ("nota", "Nota"), ("lat", "Latitud"), ("lon", "Longitud")]
     cabecera(wm, 1, [t for _, t in cols])
     for i, m in enumerate(muestras, 2):
         for j, (k, _) in enumerate(cols, 1):
             c = wm.cell(row=i, column=j)
-            texto_seguro(c, m.get(k, ""))
+            texto_seguro(c, "" if m.get(k) is None else m.get(k, ""))
             c.border = borde
     wm.freeze_panes = "A2"
     wm.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(len(muestras) + 1, 2)}"
-    anchos(wm, [19, 16, 14, 13, 13, 16, 22, 9, 9, 9, 13, 9, 30])
+    anchos(wm, [19, 16, 14, 13, 13, 16, 22, 9, 9, 9, 13, 9, 30, 12, 12])
 
     # ---------------- Parámetros ----------------
     wp = wb.create_sheet("Parámetros")
@@ -414,4 +428,164 @@ def generar_excel(muestras, params, area_ha=1.0):
 
     buf = io.BytesIO()
     wb.save(buf)
+    return buf.getvalue()
+
+
+
+# =====================================================================
+# Calidad de la foto, ubicación, evolución e informe
+# =====================================================================
+UMBRAL_NITIDEZ = 60.0
+
+
+def calidad_foto(img):
+    """Revisa la foto ANTES de gastar una consulta. Devuelve la lista de problemas (vacía si está bien)."""
+    import numpy as np
+
+    problemas = []
+    if min(img.size) < 480:
+        problemas.append("tiene muy poca resolución")
+    ch = img.convert("L")
+    ch.thumbnail((640, 640))
+    g = np.asarray(ch, dtype="float32")
+    brillo = float(g.mean())
+    if brillo < 55:
+        problemas.append("está muy oscura")
+    elif brillo > 220:
+        problemas.append("está muy clara (sobreexpuesta)")
+    if g.shape[0] > 3 and g.shape[1] > 3:
+        lap = 4 * g[1:-1, 1:-1] - g[:-2, 1:-1] - g[2:, 1:-1] - g[1:-1, :-2] - g[1:-1, 2:]
+        if float(lap.var()) < UMBRAL_NITIDEZ:
+            problemas.append("salió movida o desenfocada")
+    return problemas
+
+
+def gps_exif(datos):
+    """Lee la ubicación guardada dentro de la foto (si el celular la guardó). Devuelve (lat, lon) o None."""
+    import io
+
+    try:
+        exif = Image.open(io.BytesIO(datos)).getexif()
+        gps = exif.get_ifd(0x8825)
+        if not gps or 2 not in gps or 4 not in gps:
+            return None
+
+        def grados(t):
+            d, m, s = (float(x) for x in t)
+            return d + m / 60.0 + s / 3600.0
+
+        lat = grados(gps[2]) * (-1 if str(gps.get(1, "N")).upper().startswith("S") else 1)
+        lon = grados(gps[4]) * (-1 if str(gps.get(3, "E")).upper().startswith("W") else 1)
+        if abs(lat) > 90 or abs(lon) > 180 or (lat == 0 and lon == 0):
+            return None
+        return round(lat, 5), round(lon, 5)
+    except Exception:
+        return None
+
+
+def evolucion_madurez(muestras):
+    """% de bayas maduras por lote y por día. Devuelve [{'fecha','lote','madurez','n'}] ordenado."""
+    acum = {}
+    for m in muestras:
+        fecha = str(m.get("hora", ""))[:10]
+        v, md = int(m.get("verdes", 0) or 0), int(m.get("maduras", 0) or 0)
+        if len(fecha) != 10 or (v + md) == 0:
+            continue
+        a = acum.setdefault((fecha, m.get("lote", "Lote 1")), [0, 0, 0])
+        a[0] += md
+        a[1] += v + md
+        a[2] += 1
+    return [{"fecha": f, "lote": lt, "madurez": a[0] / a[1], "n": a[2]} for (f, lt), a in sorted(acum.items())]
+
+
+def _fuente_pdf(tam, negrita=False):
+    for nombre in (("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf") if negrita
+                   else ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf")):
+        try:
+            return ImageFont.truetype(nombre, tam)
+        except OSError:
+            continue
+    return _fuente(tam)
+
+
+def informe_pdf(muestras, params, area_ha=1.0, titulo="Todos los lotes"):
+    """Informe de una página (A4) en PDF, listo para compartir. Devuelve los bytes."""
+    import io
+    from datetime import datetime
+
+    unidades_ha, factor, cuajado, peso = params
+    W, H = 1240, 1754
+    pag = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(pag)
+    azul, oscuro, gris, claro = (63, 74, 158), (27, 31, 75), (91, 97, 144), (238, 241, 252)
+    f = {k: _fuente_pdf(t, b) for k, (t, b) in {"gigante": (84, True), "titulo": (54, True), "h": (34, True),
+                                                  "n": (28, False), "nb": (28, True), "s": (22, False)}.items()}
+
+    def texto(x, y, t, fuente, color=oscuro, ancla="la"):
+        d.text((x, y), str(t), font=f[fuente], fill=color, anchor=ancla)
+
+    d.rectangle([0, 0, W, 190], fill=oscuro)
+    texto(70, 55, "ContaBlue", "titulo", "white")
+    texto(70, 125, "Informe de estimación de producción", "n", (200, 206, 245))
+    texto(W - 70, 70, f"{datetime.now():%d/%m/%Y}", "n", (200, 206, 245), "ra")
+    texto(W - 70, 115, titulo, "nb", "white", "ra")
+
+    r = resumen(muestras, unidades_ha, factor, cuajado, peso)
+    ton = r["kg_ha_total"] * area_ha / 1000.0
+    d.rounded_rectangle([70, 240, W - 70, 520], radius=28, fill=azul)
+    texto(110, 275, "Producción total estimada", "n", (214, 219, 250))
+    texto(110, 320, f"{r['kg_ha_total']:,.0f} kg/ha", "gigante", "white")
+    margen = f"± {r['margen']:,.0f} kg/ha (95 % de confianza)" if r["margen"] is not None else \
+        "Faltan muestras para calcular el margen de error"
+    texto(110, 425, margen, "n", (214, 219, 250))
+    texto(110, 470, f"≈ {ton:,.2f} toneladas en {area_ha:g} ha  ·  Confianza {r['calidad'].lower()}", "nb", "white")
+
+    tiles = [("Muestras", f"{r['n_muestras']}"), ("Flores / unidad", f"{r['flores_por_unidad']:.1f}"),
+             ("Bayas / unidad", f"{r['bayas_por_unidad']:.1f}"),
+             ("Madurez", f"{r['pct_madurez']:.0%}" if r["pct_madurez"] is not None else "—")]
+    ancho = (W - 140 - 3 * 24) // 4
+    for i, (et, val) in enumerate(tiles):
+        x = 70 + i * (ancho + 24)
+        d.rounded_rectangle([x, 560, x + ancho, 700], radius=20, fill=claro)
+        texto(x + 24, 580, et, "s", gris)
+        texto(x + 24, 622, val, "h")
+
+    texto(70, 745, "Resultado por lote", "h")
+    cols = [("Lote", 70, "la"), ("Muestras", 470, "ra"), ("Flores/u", 640, "ra"), ("Bayas/u", 800, "ra"),
+            ("Madurez", 970, "ra"), ("kg/ha", W - 70, "ra")]
+    d.rectangle([70, 800, W - 70, 850], fill=oscuro)
+    for t, x, a in cols:
+        texto(x + (20 if a == "la" else -10), 810, t, "s", "white", a)
+    lotes = sorted({m["lote"] for m in muestras})[:10]
+    y = 860
+    datos_barra = []
+    for i, lt in enumerate(lotes):
+        rr = resumen([m for m in muestras if m["lote"] == lt], unidades_ha, factor, cuajado, peso)
+        if i % 2 == 0:
+            d.rectangle([70, y - 4, W - 70, y + 44], fill=(248, 249, 254))
+        vals = [lt[:22], rr["n_muestras"], f"{rr['flores_por_unidad']:.1f}", f"{rr['bayas_por_unidad']:.1f}",
+                f"{rr['pct_madurez']:.0%}" if rr["pct_madurez"] is not None else "—", f"{rr['kg_ha_total']:,.0f}"]
+        for (t, x, a), v in zip(cols, vals):
+            texto(x + (20 if a == "la" else -10), y + 4, v, "n", oscuro, a)
+        datos_barra.append((lt[:14], rr["kg_ha_total"]))
+        y += 52
+    if len(lotes) < len({m["lote"] for m in muestras}):
+        texto(70, y + 6, "…hay más lotes; descarga el Excel para verlos todos.", "s", gris)
+
+    if len(datos_barra) > 1:
+        top = max(v for _, v in datos_barra) or 1
+        base_y, alto = 1560, 220
+        texto(70, base_y - alto - 55, "Comparación de kg/ha entre lotes", "nb")
+        ancho_b = min(110, (W - 140) // (len(datos_barra) * 2))
+        for i, (nom, v) in enumerate(datos_barra):
+            x = 90 + i * (ancho_b * 2)
+            h = int(alto * v / top)
+            d.rounded_rectangle([x, base_y - h, x + ancho_b, base_y], radius=8, fill=azul)
+            texto(x + ancho_b // 2, base_y + 8, nom, "s", gris, "ma")
+
+    texto(70, H - 130, f"Parámetros: {unidades_ha:,.0f} unidades/ha · oclusión ×{factor:g} · cuajado {cuajado:.0%} · "
+          f"peso de baya {peso:g} g", "s", gris)
+    texto(70, H - 90, "Estimación basada en conteo por fotos; contrástala con tu cosecha real.", "s", gris)
+    buf = io.BytesIO()
+    pag.save(buf, "PDF", resolution=150)
     return buf.getvalue()

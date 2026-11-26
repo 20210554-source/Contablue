@@ -1,5 +1,4 @@
-# Conteo de bayas y flores (Roboflow + Streamlit)
-
+# Conteo de bayas y flores 
 App web que se usa desde el celular: tomas una foto, Roboflow detecta flores y bayas, y la app estima la producción por hectárea.
 
 ## Ejecutar en tu computador
